@@ -521,11 +521,38 @@ func (e *Validator) filterSTSFiles(files []string) []string {
 	return filtered
 }
 
+// filesFromPushEvent returns the STS policy files present at the head of the
+// push, replaying each commit's file changes in order so the result matches the
+// net diff the CompareCommits path returns. A file added or modified and then
+// removed later in the same push nets out to absent and is excluded (and a file
+// removed then re-added nets to present), matching the Compare path's skip of
+// files whose net status is "removed". Order is by first appearance; downstream
+// validation deduplicates, so each path appears at most once.
 func (e *Validator) filesFromPushEvent(event *github.PushEvent) []string {
-	var files []string //nolint:prealloc // size depends on file content, not commit count
+	present := make(map[string]bool)
+	var order []string
+	mark := func(name string, exists bool) {
+		if _, seen := present[name]; !seen {
+			order = append(order, name)
+		}
+		present[name] = exists
+	}
 	for _, commit := range event.Commits {
-		files = append(files, e.filterSTSFiles(commit.Added)...)
-		files = append(files, e.filterSTSFiles(commit.Modified)...)
+		for _, file := range e.filterSTSFiles(commit.Added) {
+			mark(file, true)
+		}
+		for _, file := range e.filterSTSFiles(commit.Modified) {
+			mark(file, true)
+		}
+		for _, file := range e.filterSTSFiles(commit.Removed) {
+			mark(file, false)
+		}
+	}
+	var files []string //nolint:prealloc // depends on net-present count, not commit count
+	for _, name := range order {
+		if present[name] {
+			files = append(files, name)
+		}
 	}
 	return files
 }

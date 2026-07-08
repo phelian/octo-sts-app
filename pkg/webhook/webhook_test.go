@@ -423,12 +423,36 @@ func TestFilesFromPushEvent(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "multiple commits deduplicated downstream",
+			name: "same file across commits returned once",
 			commits: []*github.HeadCommit{
 				{Added: []string{".github/chainguard/a.sts.yaml"}},
 				{Modified: []string{".github/chainguard/a.sts.yaml"}},
 			},
-			want: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/a.sts.yaml"},
+			want: []string{".github/chainguard/a.sts.yaml"},
+		},
+		{
+			name: "added then removed across commits excluded",
+			commits: []*github.HeadCommit{
+				{Added: []string{".github/chainguard/a.sts.yaml"}},
+				{Removed: []string{".github/chainguard/a.sts.yaml"}},
+			},
+			want: nil,
+		},
+		{
+			name: "modified then removed across commits excluded",
+			commits: []*github.HeadCommit{
+				{Modified: []string{".github/chainguard/a.sts.yaml"}},
+				{Removed: []string{".github/chainguard/a.sts.yaml"}},
+			},
+			want: nil,
+		},
+		{
+			name: "removed then re-added across commits included",
+			commits: []*github.HeadCommit{
+				{Removed: []string{".github/chainguard/a.sts.yaml"}},
+				{Added: []string{".github/chainguard/a.sts.yaml"}},
+			},
+			want: []string{".github/chainguard/a.sts.yaml"},
 		},
 		{
 			name: "non-sts files filtered out",
