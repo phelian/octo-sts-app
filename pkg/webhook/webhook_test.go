@@ -167,10 +167,14 @@ func TestOrgFilter(t *testing.T) {
 					Login: new(tc.org),
 				},
 				Repo: &github.PushEventRepository{
+					Name: new("repo"),
 					Owner: &github.User{
 						Login: new(tc.org),
 					},
 				},
+				Installation: &github.Installation{ID: new(int64(1))},
+				Before:       new("before"),
+				After:        new("after"),
 				Commits: []*github.HeadCommit{{
 					Added: []string{".github/chainguard/test.sts.yaml"},
 				}},
@@ -1735,6 +1739,7 @@ func TestWebhookCheckRunBotSkipped(t *testing.T) {
 			Login: new("some-other-app[bot]"),
 		},
 		CheckRun: &github.CheckRun{
+			HeadSHA: new("abc123"),
 			CheckSuite: &github.CheckSuite{
 				HeadSHA:   new("abc123"),
 				BeforeSHA: new("def456"),
@@ -3296,7 +3301,7 @@ func sendForcedPush(t *testing.T, v *Validator, secret []byte) {
 		After:   new("after"),
 		Forced:  new(true),
 		Sender:  &github.User{Login: new("mallory"), ID: new(int64(99))},
-		Commits: []*github.HeadCommit{},
+		Commits: []*github.HeadCommit{{}},
 	})
 	if err != nil {
 		t.Fatal(err)

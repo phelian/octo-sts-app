@@ -439,10 +439,28 @@ func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var cr *github.CheckRun
 	switch event := event.(type) {
 	case *github.PullRequestEvent:
+		if !validWebhookRepository(event.GetRepo(), event.GetInstallation()) || event.GetNumber() == 0 || event.PullRequest == nil || event.PullRequest.Head == nil || event.PullRequest.Head.GetSHA() == "" {
+			http.Error(w, "pull_request event metadata is incomplete", http.StatusBadRequest)
+			return
+		}
 		cr, err = e.handlePullRequest(ctx, event)
 	case *github.PushEvent:
+		if !validPushWebhookRepository(event.GetRepo(), event.GetInstallation()) || event.GetBefore() == "" || event.GetAfter() == "" || event.Commits == nil {
+			http.Error(w, "push event metadata is incomplete", http.StatusBadRequest)
+			return
+		}
+		for _, commit := range event.Commits {
+			if commit == nil {
+				http.Error(w, "push event contains a null commit", http.StatusBadRequest)
+				return
+			}
+		}
 		cr, err = e.handlePush(ctx, event)
 	case *github.CheckSuiteEvent:
+		if !validWebhookRepository(event.GetRepo(), event.GetInstallation()) || !validWebhookCheckSuite(event.GetCheckSuite()) {
+			http.Error(w, "check_suite event metadata is incomplete", http.StatusBadRequest)
+			return
+		}
 		if isBotSender(event.GetSender()) {
 			log.Infof("skipping bot-triggered check_suite from %s", event.GetSender().GetLogin())
 			w.WriteHeader(http.StatusAccepted)
@@ -450,6 +468,10 @@ func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		cr, err = e.handleCheckSuite(ctx, event)
 	case *github.CheckRunEvent:
+		if !validWebhookRepository(event.GetRepo(), event.GetInstallation()) || event.CheckRun == nil || event.GetCheckRun().GetHeadSHA() == "" || !validWebhookCheckSuite(event.GetCheckRun().GetCheckSuite()) {
+			http.Error(w, "check_run event metadata is incomplete", http.StatusBadRequest)
+			return
+		}
 		if isBotSender(event.GetSender()) {
 			log.Infof("skipping bot-triggered check_run from %s", event.GetSender().GetLogin())
 			w.WriteHeader(http.StatusAccepted)
@@ -473,6 +495,26 @@ func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Info("created CheckRun", "check_run", cr)
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func validWebhookRepository(repo *github.Repository, installation *github.Installation) bool {
+	return repo != nil && repo.GetOwner().GetLogin() != "" && repo.GetName() != "" && installation != nil && installation.GetID() != 0
+}
+
+func validPushWebhookRepository(repo *github.PushEventRepository, installation *github.Installation) bool {
+	return repo != nil && repo.GetOwner().GetLogin() != "" && repo.GetName() != "" && installation != nil && installation.GetID() != 0
+}
+
+func validWebhookCheckSuite(suite *github.CheckSuite) bool {
+	if suite == nil || suite.GetHeadSHA() == "" || suite.GetBeforeSHA() == "" {
+		return false
+	}
+	for _, pr := range suite.PullRequests {
+		if pr == nil || pr.GetNumber() == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *Validator) validatePayload(r *http.Request) ([]byte, error) {
