@@ -4,9 +4,11 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -14,8 +16,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chainguard-dev/clog"
 	"github.com/coreos/go-oidc/v3/oidc"
 )
+
+func TestGet_DiscoveryKeepsRequestLogContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	var logs bytes.Buffer
+	ctx := clog.WithLogger(t.Context(), clog.New(slog.NewTextHandler(&logs, nil)))
+	if _, err := Get(ctx, server.URL); err == nil {
+		t.Fatal("Get() = nil error, want failed discovery")
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("provider creation failed")) {
+		t.Fatalf("shared discovery discarded the request logger: %s", logs.String())
+	}
+}
 
 func TestGet_SingleflightCollapsesConcurrentCallers(t *testing.T) {
 	var hits atomic.Int32

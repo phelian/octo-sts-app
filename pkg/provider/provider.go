@@ -96,7 +96,10 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 	// waiting, so other callers sharing the issuer are unaffected either
 	// way.
 	ch := discoveryFlight.DoChan(issuer, func() (any, error) {
-		discoveryCtx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
+		// Detach the shared work from the first caller's cancellation while
+		// retaining its trace, metric and logging values. The fixed timeout
+		// still bounds work after all callers have stopped waiting.
+		discoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), discoveryTimeout)
 		defer cancel()
 		discoveryCtx = oidc.ClientContext(discoveryCtx, &http.Client{
 			Transport: maxsize.NewRoundTripper(MaximumResponseSize, httpmetrics.Transport),
