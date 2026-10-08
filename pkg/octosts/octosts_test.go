@@ -300,6 +300,52 @@ func TestExchange(t *testing.T) {
 // not match a trust policy learns nothing about the policy's contents: neither
 // the patterns CheckToken compared against nor the app pin, which used to be
 // resolved (and its error returned) before the token was checked.
+func TestExchangeKeepsTokenShapeErrors(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "private"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+	iss := "https://token.actions.githubusercontent.com"
+	// A tab in the subject fails oidcvalidate.IsValidSubject inside CheckToken.
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "repo:org/repo:ref:refs/heads/main\t",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{
+		PublicKeys: []crypto.PublicKey{pk.Public()},
+	})
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	pool := &ghinstall.OrgPool{
+		M:        &fakeInstallMgr{atr: newAppsTransport(t, newFakeGitHub())},
+		AppCount: 1,
+	}
+	sts := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
+
+	// The token's own shape is the caller's problem and names no policy
+	// value, so its status and message are returned unchanged.
+	_, err = sts.Exchange(ctx, &v1.ExchangeRequest{Identity: "private", Scopes: []string{"org/repo"}})
+	if got := status.Code(err); got != codes.InvalidArgument {
+		t.Fatalf("Exchange() code = %v, want InvalidArgument; err = %v", got, err)
+	}
+	if got, want := status.Convert(err).Message(), "invalid subject in token"; got != want {
+		t.Errorf("Exchange() message = %q, want %q", got, want)
+	}
+}
+
 func TestExchangeMismatchDoesNotLeakPolicy(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "private"}
 	trustPolicies.Remove(key)

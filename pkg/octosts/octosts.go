@@ -282,7 +282,17 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		if cerr != nil {
 			clog.FromContext(ctx).Warnf("token does not match trust policy: %v", cerr)
 			e.Error = cerr.Error()
-			return status.Error(codes.PermissionDenied, "token does not match trust policy")
+			switch status.Code(cerr) {
+			case codes.PermissionDenied:
+				// The mismatch detail names the policy's patterns; it stays in
+				// the log and the audit event.
+				return status.Error(codes.PermissionDenied, "token does not match trust policy")
+			case codes.InvalidArgument:
+				// A malformed token field describes the token, not the policy.
+				return cerr
+			default:
+				return status.Error(status.Code(cerr), "trust policy evaluation failed")
+			}
 		}
 		return nil
 	}
