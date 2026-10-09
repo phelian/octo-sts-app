@@ -296,6 +296,106 @@ func TestExchange(t *testing.T) {
 	}
 }
 
+// TestExchangeKeepsTokenShapeErrors verifies that a malformed token field is
+// reported as InvalidArgument with its own message, and before any
+// installation lookup: the failing manager would otherwise turn the response
+// into its "not installed" error.
+func TestExchangeKeepsTokenShapeErrors(t *testing.T) {
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+	iss := "https://token.actions.githubusercontent.com"
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{
+		PublicKeys: []crypto.PublicKey{pk.Public()},
+	})
+	pool := &ghinstall.OrgPool{M: &failInstallMgr{}, AppCount: 1}
+	sts := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
+
+	for _, tc := range []struct {
+		name   string
+		claims josejwt.Claims
+		want   string
+	}{
+		{
+			name:   "tab in subject",
+			claims: josejwt.Claims{Subject: "repo:org/repo:ref:refs/heads/main\t", Audience: josejwt.Audience{"octosts"}},
+			want:   "invalid subject in token",
+		},
+		{
+			name:   "newline in audience",
+			claims: josejwt.Claims{Subject: "repo:org/repo:ref:refs/heads/main", Audience: josejwt.Audience{"octosts\n"}},
+			want:   "invalid audience in token",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.claims.Issuer = iss
+			tc.claims.Expiry = josejwt.NewNumericDate(time.Now().Add(10 * time.Minute))
+			token, err := josejwt.Signed(signer).Claims(tc.claims).Serialize()
+			if err != nil {
+				t.Fatalf("Serialize failed: %v", err)
+			}
+			ctx := metadata.NewIncomingContext(context.Background(), metadata.MD{"authorization": []string{"Bearer " + token}})
+
+			_, err = sts.Exchange(ctx, &v1.ExchangeRequest{Identity: "private", Scopes: []string{"org/repo"}})
+			if got := status.Code(err); got != codes.InvalidArgument {
+				t.Fatalf("Exchange() code = %v, want InvalidArgument; err = %v", got, err)
+			}
+			if got := status.Convert(err).Message(); got != tc.want {
+				t.Errorf("Exchange() message = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCallerFacingCheckTokenError(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		err      error
+		wantCode codes.Code
+		wantMsg  string
+	}{
+		{
+			name:     "mismatch is sanitised",
+			err:      status.Error(codes.PermissionDenied, "trust policy: subject \"x\" did not match pattern \"secret\""),
+			wantCode: codes.PermissionDenied,
+			wantMsg:  "token does not match trust policy",
+		},
+		{
+			name:     "token shape is returned unchanged",
+			err:      status.Error(codes.InvalidArgument, "invalid subject in token"),
+			wantCode: codes.InvalidArgument,
+			wantMsg:  "invalid subject in token",
+		},
+		{
+			name:     "server failure keeps its code",
+			err:      status.Error(codes.Internal, "trust policy: not compiled"),
+			wantCode: codes.Internal,
+			wantMsg:  "trust policy evaluation failed",
+		},
+		{
+			name:     "plain error is unknown",
+			err:      errors.New("boom"),
+			wantCode: codes.Unknown,
+			wantMsg:  "trust policy evaluation failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := callerFacingCheckTokenError(context.Background(), tc.err)
+			if status.Code(got) != tc.wantCode {
+				t.Errorf("code = %v, want %v", status.Code(got), tc.wantCode)
+			}
+			if status.Convert(got).Message() != tc.wantMsg {
+				t.Errorf("message = %q, want %q", status.Convert(got).Message(), tc.wantMsg)
+			}
+		})
+	}
+}
+
 // TestExchangeMismatchDoesNotLeakPolicy verifies that a caller whose token does
 // not match a trust policy learns nothing about the policy's contents: neither
 // the patterns CheckToken compared against nor the app pin, which used to be
