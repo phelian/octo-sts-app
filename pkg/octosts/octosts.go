@@ -257,6 +257,16 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		Issuer:  tok.Issuer,
 		Subject: tok.Subject,
 	}
+	// Reject malformed token fields before spending an installation lookup or
+	// a policy read. CheckToken repeats these checks for its other callers.
+	if !oidcvalidate.IsValidSubject(tok.Subject) {
+		return nil, status.Error(codes.InvalidArgument, "invalid subject in token")
+	}
+	for _, aud := range tok.Audience {
+		if !oidcvalidate.IsValidAudience(aud) {
+			return nil, status.Error(codes.InvalidArgument, "invalid audience in token")
+		}
+	}
 
 	// Request validation.
 	if requestScope == "" {
@@ -273,26 +283,15 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	// Check the token against the federation rules. The trust policy may live
-	// in a private repo, so the detailed reason (which names the policy's
+	// in a private repo, so the mismatch reason (which names the policy's
 	// patterns) goes to the log and the event, never to the caller.
 	authorize := func(tp *OrgTrustPolicy) error {
 		clog.FromContext(ctx).Infof("trust policy: %#v", tp)
 		var cerr error
 		e.Actor, cerr = tp.CheckToken(tok, s.domain)
 		if cerr != nil {
-			clog.FromContext(ctx).Warnf("token does not match trust policy: %v", cerr)
 			e.Error = cerr.Error()
-			switch status.Code(cerr) {
-			case codes.PermissionDenied:
-				// The mismatch detail names the policy's patterns; it stays in
-				// the log and the audit event.
-				return status.Error(codes.PermissionDenied, "token does not match trust policy")
-			case codes.InvalidArgument:
-				// A malformed token field describes the token, not the policy.
-				return cerr
-			default:
-				return status.Error(status.Code(cerr), "trust policy evaluation failed")
-			}
+			return callerFacingCheckTokenError(ctx, cerr)
 		}
 		return nil
 	}
@@ -354,6 +353,26 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 // hasChecksWrite reports whether the given permissions include checks:write.
 func hasChecksWrite(perms github.InstallationPermissions) bool {
 	return perms.Checks != nil && *perms.Checks == "write"
+}
+
+// callerFacingCheckTokenError maps a CheckToken error to the response a caller
+// may see. A mismatch names the policy's patterns, so only its class is
+// returned and the detail stays in the log and the audit event. A malformed
+// token field describes the caller's own token and is returned unchanged.
+// Anything else is a server-side failure: the code is kept so operators see
+// the right class, the message is not.
+func callerFacingCheckTokenError(ctx context.Context, err error) error {
+	switch status.Code(err) {
+	case codes.PermissionDenied:
+		clog.FromContext(ctx).Warnf("token does not match trust policy: %v", err)
+		return status.Error(codes.PermissionDenied, "token does not match trust policy")
+	case codes.InvalidArgument:
+		clog.FromContext(ctx).Infof("malformed token field: %v", err)
+		return err
+	default:
+		clog.FromContext(ctx).Errorf("trust policy evaluation failed: %v", err)
+		return status.Error(status.Code(err), "trust policy evaluation failed")
+	}
 }
 
 // getExchangeInstall picks the installation for the token exchange, in
